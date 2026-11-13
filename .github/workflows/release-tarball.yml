@@ -1,0 +1,74 @@
+name: Publish source tarball
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write       # needed to create the tag/release and upload assets
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FEATURE_JSON: devcontainer-feature.json   # adjust if it lives elsewhere, e.g. src/my-feature/devcontainer-feature.json
+
+jobs:
+  tarball:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version from devcontainer-feature.json
+        id: meta
+        run: |
+          VERSION="$(jq -er '.version' "$FEATURE_JSON")"
+          ID="$(jq -r '.id // empty' "$FEATURE_JSON")"
+          NAME="${ID:-${GITHUB_REPOSITORY#*/}}-${VERSION}"
+          TAG="v${VERSION}"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "name=$NAME"       >> "$GITHUB_OUTPUT"
+          echo "file=$NAME.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION  Tag: $TAG  Archive: $NAME.tar.gz"
+
+      - name: Check whether this version is already released
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ steps.meta.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Release ${{ steps.meta.outputs.tag }} already exists - skipping."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create tarball with git archive
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          # Respects export-ignore / export-subst in .gitattributes
+          git archive \
+            --format=tar.gz \
+            --prefix="${{ steps.meta.outputs.name }}/" \
+            -o "${{ steps.meta.outputs.file }}" \
+            HEAD
+          sha256sum "${{ steps.meta.outputs.file }}" > "${{ steps.meta.outputs.file }}.sha256"
+          ls -lh "${{ steps.meta.outputs.file }}"
+
+      - name: Publish GitHub release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.meta.outputs.tag }}" \
+            "${{ steps.meta.outputs.file }}" \
+            "${{ steps.meta.outputs.file }}.sha256" \
+            --target "$GITHUB_SHA" \
+            --title "${{ steps.meta.outputs.tag }}" \
+            --generate-notes
